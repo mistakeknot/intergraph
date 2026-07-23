@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""intergraph CLI — ingest / query / export the Sylveste ecosystem graph."""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from intergraph import export, ingest, store  # noqa: E402
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="intergraph")
+    ap.add_argument("--db", help="SQLite db path (default: data/intergraph.db)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p_ing = sub.add_parser("ingest", help="rebuild graph from interverse manifests")
+    p_ing.add_argument("--root", help="interverse root (default: auto-detect)")
+
+    sub.add_parser("stats", help="node/edge counts")
+    sub.add_parser("export", help="interchart-compatible JSON to stdout")
+
+    p_nb = sub.add_parser("neighbors", help="direct edges for a node")
+    p_nb.add_argument("id")
+    p_nb.add_argument("--direction", choices=["in", "out", "both"], default="both")
+
+    p_path = sub.add_parser("path", help="shortest path between two nodes")
+    p_path.add_argument("a")
+    p_path.add_argument("b")
+
+    p_imp = sub.add_parser("impact", help="reverse-transitive dependents of a node")
+    p_imp.add_argument("id")
+
+    p_dead = sub.add_parser("dead-nodes", help="nodes nothing references")
+    p_dead.add_argument("--kind", default="plugin")
+
+    p_sug = sub.add_parser("suggested-connections", help="one-way reference pairs")
+    p_sug.add_argument("--limit", type=int, default=20)
+
+    sub.add_parser("overlaps", help="domain-keyword overlap pairs")
+
+    args = ap.parse_args()
+    con = store.connect(args.db)
+
+    if args.cmd == "ingest":
+        root = Path(args.root).resolve() if args.root else ingest.INTERVERSE
+        counts = ingest.ingest(root, con)
+        print(json.dumps({"ok": True, "root": str(root), "counts": counts}, indent=2))
+        return 0
+
+    out = {
+        "stats": lambda: store.stats(con),
+        "export": lambda: export.export(con),
+        "neighbors": lambda: store.neighbors(con, args.id, args.direction),
+        "path": lambda: store.path(con, args.a, args.b),
+        "impact": lambda: store.impact(con, args.id),
+        "dead-nodes": lambda: store.dead_nodes(con, args.kind),
+        "suggested-connections": lambda: store.suggested_connections(con, args.limit),
+        "overlaps": lambda: export.compute_overlaps(con),
+    }[args.cmd]()
+    print(json.dumps(out, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
