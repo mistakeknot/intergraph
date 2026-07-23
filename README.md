@@ -40,19 +40,36 @@ MCP tools (same names with `graph_` prefix): `graph_stats`,
 The server auto-ingests on first run if the DB is missing. DB path override:
 `INTERGRAPH_DB`.
 
-## Three signal layers (roadmap)
+## Three signal layers
 
 | Phase | Signal | Status |
 |-------|--------|--------|
-| 1 | Declared structure — manifests, SKILL.md frontmatter, hooks, MCP configs, cross-plugin text references | **shipped (this MVP)** |
-| 2 | Observed behavior — cass session co-occurrence, beads deps, git co-change; time-decayed edge weights; drift view | planned |
-| 3 | Code edges — `tldrs calls`/`impact` call graphs per repo | planned |
+| 1 | Declared structure — manifests, SKILL.md frontmatter, hooks, MCP configs, cross-plugin text references | shipped |
+| 2 | Observed behavior — session-history co-occurrence across Claude/Kimi/Codex with 14-day half-life decay; `graph_drift` declared-vs-observed view; behavioral overlaps | shipped |
+| 3 | Code edges — cross-plugin `calls` edges from tldrs import analysis (Go) + regex over code files | shipped |
+
+## Behavioral model
+
+`intergraph/behavior.py` scans `~/.claude/projects`, `~/.kimi-code/sessions`,
+and `~/.codex/sessions` (read-only, 56-day window) for plugin-name mentions.
+Each session file contributes `0.5 ** (age_days / 14)` to every plugin it
+mentions and every pair that co-occurs in it. That yields `co-occurs` edges
+and per-plugin `observed` weights in node meta — the autotune signal.
+Deliberately excluded: beads deps and git co-change (work-graph ≠ code-graph).
+
+## Code edges
+
+`intergraph/code.py` adds `calls` edges between plugins from tldrs import
+analysis (Go module imports, high confidence) plus a regex pass over code
+files (exec'd binaries, socket paths, endpoints). `impact()`/`path()` span
+them. Skip with `--no-code`; skip behavior with `--no-behavior`.
 
 ## Caveats
 
-`references` edges mean "mentions in a body of text", not "calls".
-`graph_overlaps` is a description-keyword heuristic until phase 2. `depends-on`
-is empty ecosystem-wide (no plugin declares peerDependencies yet).
+`references` edges mean "mentions in a body of text", not "calls"; `calls`
+edges mean "mentions in code" unless marked `tldrs-import`. `co-occurs` means
+"mentioned in the same session" — strong coupling signal, not causation.
+`depends-on` is empty ecosystem-wide (no plugin declares peerDependencies).
 
 ## Development
 

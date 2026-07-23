@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from intergraph import export, ingest, store  # noqa: E402
+from intergraph import behavior, code, export, ingest, store  # noqa: E402
 
 
 def main() -> int:
@@ -19,6 +19,10 @@ def main() -> int:
 
     p_ing = sub.add_parser("ingest", help="rebuild graph from interverse manifests")
     p_ing.add_argument("--root", help="interverse root (default: auto-detect)")
+    p_ing.add_argument("--no-behavior", action="store_true",
+                       help="skip session-history behavioral scan")
+    p_ing.add_argument("--no-code", action="store_true",
+                       help="skip code-level cross-plugin scan")
 
     sub.add_parser("stats", help="node/edge counts")
     sub.add_parser("export", help="interchart-compatible JSON to stdout")
@@ -40,7 +44,10 @@ def main() -> int:
     p_sug = sub.add_parser("suggested-connections", help="one-way reference pairs")
     p_sug.add_argument("--limit", type=int, default=20)
 
-    sub.add_parser("overlaps", help="domain-keyword overlap pairs")
+    sub.add_parser("overlaps", help="overlap pairs (behavioral evidence ranks first)")
+
+    p_drift = sub.add_parser("drift", help="declared vs observed coupling, both directions")
+    p_drift.add_argument("--limit", type=int, default=50)
 
     args = ap.parse_args()
     con = store.connect(args.db)
@@ -48,7 +55,12 @@ def main() -> int:
     if args.cmd == "ingest":
         root = Path(args.root).resolve() if args.root else ingest.INTERVERSE
         counts = ingest.ingest(root, con)
-        print(json.dumps({"ok": True, "root": str(root), "counts": counts}, indent=2))
+        out = {"ok": True, "root": str(root), "counts": counts}
+        if not args.no_behavior:
+            out["behavior"] = behavior.ingest_behavior(con)
+        if not args.no_code:
+            out["code"] = code.ingest_code(con, root)
+        print(json.dumps(out, indent=2))
         return 0
 
     out = {
@@ -60,6 +72,7 @@ def main() -> int:
         "dead-nodes": lambda: store.dead_nodes(con, args.kind),
         "suggested-connections": lambda: store.suggested_connections(con, args.limit),
         "overlaps": lambda: export.compute_overlaps(con),
+        "drift": lambda: store.drift(con, args.limit),
     }[args.cmd]()
     print(json.dumps(out, indent=2))
     return 0

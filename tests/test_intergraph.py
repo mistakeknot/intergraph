@@ -86,7 +86,7 @@ class IntergraphTest(unittest.TestCase):
         resp = server.handle(self.con, {"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual(resp["result"]["serverInfo"]["name"], "intergraph")
         resp = server.handle(self.con, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual(len(resp["result"]["tools"]), 8)
+        self.assertEqual(len(resp["result"]["tools"]), 9)
 
     def test_server_tool_call(self):
         resp = server.handle(self.con, {

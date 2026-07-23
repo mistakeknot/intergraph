@@ -78,6 +78,16 @@ def set_meta(con, key: str, value: str) -> None:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
 
 
+def update_node_meta(con, id: str, **kv) -> None:
+    """Merge keys into a node's meta JSON without touching other fields."""
+    row = con.execute("SELECT meta FROM nodes WHERE id=?", (id,)).fetchone()
+    if not row:
+        return
+    meta = json.loads(row["meta"] or "{}")
+    meta.update(kv)
+    con.execute("UPDATE nodes SET meta=? WHERE id=?", (json.dumps(meta), id))
+
+
 def get_meta(con, key: str) -> str | None:
     row = con.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
     return row["value"] if row else None
@@ -176,3 +186,37 @@ def suggested_connections(con, limit: int = 20) -> list[dict]:
              )
            ORDER BY e.weight DESC LIMIT ?""", (limit,))
     return [dict(r) for r in rows]
+
+
+def drift(con, limit: int = 50) -> dict:
+    """Declared vs. observed edges, both directions.
+
+    declared_not_observed: 'references' edges whose pair never co-occurs in
+    sessions (declared coupling the ecosystem doesn't exercise).
+    observed_not_declared: 'co-occurs' edges whose pair has no 'references'
+    edge in either direction (behavioral coupling nobody declared).
+    """
+    declared = con.execute(
+        """SELECT e.source, e.target, e.weight FROM edges e
+           WHERE e.type='references'
+             AND e.source IN (SELECT id FROM nodes WHERE kind='plugin')
+             AND e.target IN (SELECT id FROM nodes WHERE kind='plugin')
+             AND NOT EXISTS (
+               SELECT 1 FROM edges c
+               WHERE c.type='co-occurs'
+                 AND ((c.source=e.source AND c.target=e.target)
+                   OR (c.source=e.target AND c.target=e.source))
+             ) ORDER BY e.weight DESC LIMIT ?""", (limit,))
+    observed = con.execute(
+        """SELECT c.source, c.target, c.weight FROM edges c
+           WHERE c.type='co-occurs'
+             AND NOT EXISTS (
+               SELECT 1 FROM edges e
+               WHERE e.type='references'
+                 AND ((e.source=c.source AND e.target=c.target)
+                   OR (e.source=c.target AND e.target=c.source))
+             ) ORDER BY c.weight DESC LIMIT ?""", (limit,))
+    return {
+        "declared_not_observed": [dict(r) for r in declared],
+        "observed_not_declared": [dict(r) for r in observed],
+    }

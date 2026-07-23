@@ -11,7 +11,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import __version__, export, ingest, store
+from . import __version__, behavior, code, export, ingest, store
 
 PROTOCOL_VERSION = "2024-11-05"
 
@@ -79,6 +79,14 @@ TOOLS = [
         },
     },
     {
+        "name": "graph_drift",
+        "description": "Declared vs observed coupling: 'references' edges never exercised in sessions, and session co-occurrence nobody declared.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "default": 50}},
+        },
+    },
+    {
         "name": "graph_export",
         "description": "interchart-compatible JSON dump ({generated, stats, nodes, edges, overlaps}).",
         "inputSchema": {"type": "object", "properties": {}},
@@ -96,6 +104,8 @@ def _connect():
     if not path.exists():
         con = store.connect(path)
         ingest.ingest(ingest.INTERVERSE, con)
+        behavior.ingest_behavior(con)
+        code.ingest_code(con, ingest.INTERVERSE)
         return con
     return store.connect(path)
 
@@ -130,6 +140,8 @@ def _call_tool(con, name: str, args: dict):
         return export.compute_overlaps(con)
     if name == "graph_suggested_connections":
         return store.suggested_connections(con, args.get("limit", 20))
+    if name == "graph_drift":
+        return store.drift(con, args.get("limit", 50))
     if name == "graph_export":
         return export.export(con)
     raise KeyError(name)

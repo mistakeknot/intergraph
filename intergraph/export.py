@@ -2,8 +2,7 @@
 
 Emits the same shape interchart's scan.js produces ({generated, stats, nodes,
 edges, overlaps}) so interchart can render intergraph data directly. Overlaps
-are domain-keyword pairs computed from plugin descriptions — the heuristic
-lives here until phase 2 replaces it with behavioral evidence.
+rank behavioral co-occurrence evidence (phase 2) above keyword domains.
 """
 from __future__ import annotations
 
@@ -32,23 +31,39 @@ def plugin_domains(description: str | None) -> set[str]:
 
 
 def compute_overlaps(con) -> list[dict]:
+    """Overlap pairs: behavioral co-occurrence ranks above keyword domains.
+
+    Each entry carries `behavioral` (decayed co-occurrence weight, 0 if none)
+    and `evidence` ('behavioral' | 'keyword' | 'both'). Sort: behavioral
+    weight desc, then keyword score desc.
+    """
     plugins = con.execute(
         "SELECT id, label, description FROM nodes WHERE kind='plugin'").fetchall()
     doms = {p["id"]: plugin_domains(p["description"]) for p in plugins}
     labels = {p["id"]: p["label"] for p in plugins}
+
+    behavioral: dict[tuple[str, str], float] = {}
+    for e in con.execute("SELECT source, target, weight FROM edges WHERE type='co-occurs'"):
+        behavioral[(e["source"], e["target"])] = e["weight"]
+
     out = []
     ids = sorted(doms)
     for i, a in enumerate(ids):
         for b in ids[i + 1:]:
             shared = doms[a] & doms[b]
-            if len(shared) >= 2:
+            bw = behavioral.get((a, b), behavioral.get((b, a), 0.0))
+            if len(shared) >= 2 or bw > 0:
+                evidence = "both" if (len(shared) >= 2 and bw > 0) else \
+                           ("behavioral" if bw > 0 else "keyword")
                 out.append({
                     "source": a, "sourceLabel": labels[a],
                     "target": b, "targetLabel": labels[b],
                     "score": round(1.0 + 0.6 * len(shared), 2),
                     "domains": sorted(shared),
+                    "behavioral": round(bw, 4),
+                    "evidence": evidence,
                 })
-    out.sort(key=lambda o: -o["score"])
+    out.sort(key=lambda o: (-o["behavioral"], -o["score"]))
     return out
 
 
