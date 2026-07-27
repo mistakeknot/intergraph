@@ -1,19 +1,26 @@
 {
   "name": "intergraph",
   "version": "0.1.0",
-  "description": "Autonomous self-tuning ecosystem graph for Sylveste — SQLite store + MCP query server over declared structure, with behavioral autotune planned (phase 2).",
+  "description": "Autonomous self-tuning ecosystem graph for Sylveste. SQLite store + MCP query server over declared structure (manifests, skills, hooks, MCP configs, cross-plugin references). Phase 2 adds observed-behavior edge weights from cass session histories; phase 3 adds tldrs code edges. interchart renders its export.",
   "license": "MIT",
   "keywords": [
     "graph",
     "ecosystem",
     "architecture",
     "impact-analysis",
-    "mcp"
+    "redundancy-detection",
+    "mcp",
+    "sqlite"
   ],
   "author": "mistakeknot",
   "interface": {
     "displayName": "intergraph",
-    "shortDescription": "Self-tuning ecosystem graph — MCP queries over how Sylveste plugins actually connect."
+    "shortDescription": "Autonomous self-tuning ecosystem graph for Sylveste. SQLite store + MCP query server over declared structure (manifes..."
   },
-  "skills": "./skills/"
+  "skills": "./skills/",
+  "mcpServers": {
+    "intergraph": {
+      "command": "./bin/serve-mcp.sh"
+    }
+  }
 }
