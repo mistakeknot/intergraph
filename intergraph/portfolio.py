@@ -36,7 +36,7 @@ RELATIONS = {
     'candidate-same-as': {(a, b) for a in KINDS for b in KINDS},
 }
 SCALARS = {'alias', 'description', 'classification', 'status', 'purpose',
-           'candidate-external-id', 'planned-intent', 'archived', 'url', 'subtype'}
+           'candidate-external-id', 'planned-intent', 'archived', 'url', 'subtype', 'inventory-field'}
 TABLES = ('sources', 'entities', 'claims', 'gaps', 'links')
 FIELDS = {
     'sources': {'id', 'uri', 'content_hash', 'retrieved_at', 'visibility', 'source_class'},
@@ -64,7 +64,7 @@ class PortfolioError(ValueError):
 
 
 def canonical(value):
-    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False,
+    return json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=True,
                       allow_nan=False)
 
 
@@ -89,6 +89,10 @@ def loads(text):
 def _text(value):
     if not isinstance(value, str) or not value.strip():
         raise PortfolioError('expected nonempty text')
+    try:
+        value.encode('utf-8')
+    except UnicodeError:
+        raise PortfolioError('text must be valid Unicode') from None
 
 
 def _uuid(value):
@@ -149,6 +153,9 @@ def validate(manifest):
                         'valid_from', 'valid_to'):
                 if row.get(key) is not None:
                     _time(row[key])
+            if row.get('valid_from') is not None and row.get('valid_to') is not None:
+                if datetime.fromisoformat(row['valid_from'].replace('Z', '+00:00')) > datetime.fromisoformat(row['valid_to'].replace('Z', '+00:00')):
+                    raise PortfolioError('invalid source-asserted validity interval')
             if table == 'sources':
                 if len(row['content_hash']) != 64 or any(c not in '0123456789abcdef' for c in row['content_hash']):
                     raise PortfolioError('source hash must be lowercase SHA256')
@@ -156,8 +163,8 @@ def validate(manifest):
                 _uuid(row['id'])
                 if row['kind'] not in KINDS:
                     raise PortfolioError('unregistered entity kind')
-                if type(row.get('revision', 1)) is not int or row.get('revision', 1) != 1:
-                    raise PortfolioError('initial entity revision must be one')
+                if type(row.get('revision', 1)) is not int or row.get('revision', 1) < 1:
+                    raise PortfolioError('entity revision must be a positive integer')
             if table == 'claims':
                 if row['state'] not in STATES:
                     raise PortfolioError('unregistered claim state')
@@ -249,8 +256,11 @@ def _schema(con):
             con.execute(statement)
     if con.execute('SELECT portfolio_schema_version FROM portfolio_state').fetchone()[0] != VERSION:
         raise PortfolioError('unsupported portfolio schema version')
+    con.execute('DROP TRIGGER IF EXISTS immutable_entities_UPDATE')
     for table in (*TABLES, 'batches'):
         for action in ('UPDATE', 'DELETE'):
+            if table == 'entities' and action == 'UPDATE':
+                continue
             con.execute(f'''CREATE TRIGGER IF NOT EXISTS immutable_{table}_{action}
                 BEFORE {action} ON portfolio_{table}
                 BEGIN SELECT RAISE(ABORT, 'portfolio records are immutable'); END''')
@@ -331,6 +341,7 @@ def _apply(con, manifest, expected_revision, imported_at=None):
     if type(expected_revision) is not int or expected_revision != current:
         raise PortfolioError('stale or missing expected revision')
     counts = {}
+    updates = {'entities': 0}
     for table in TABLES:
         counts[table] = 0
         for raw in manifest[table]:
@@ -340,8 +351,15 @@ def _apply(con, manifest, expected_revision, imported_at=None):
                 if table == 'claims' and 'batch_id' not in raw:
                     row['batch_id'] = old['batch_id']
                 if dict(old) != row:
-                    raise PortfolioError('immutable record ID reused with different content')
+                    if table != 'entities' or row['revision'] != old['revision'] + 1 or row['created_at'] != old['created_at']:
+                        raise PortfolioError('immutable record change or stale entity revision')
+                    keys = sorted(set(row) - {'id'})
+                    con.execute(f"UPDATE portfolio_entities SET {','.join(k + '=?' for k in keys)} WHERE id=?",
+                                [row[k] for k in keys] + [row['id']])
+                    updates['entities'] += 1
                 continue
+            if table == 'entities' and row['revision'] != 1:
+                raise PortfolioError('new entity revision must be one')
             if table == 'claims':
                 subject = con.execute('SELECT kind FROM portfolio_entities WHERE id=?', (row['subject_id'],)).fetchone()
                 obj = con.execute('SELECT kind FROM portfolio_entities WHERE id=?', (row['object_id'],)).fetchone()
@@ -355,17 +373,29 @@ def _apply(con, manifest, expected_revision, imported_at=None):
                         raise PortfolioError('supersession must refer to prior claim on same subject and predicate')
                     if row['state'] == 'retracted' and (prior['object_id'], prior['value_json']) != (row['object_id'], row['value_json']):
                         raise PortfolioError('retraction must preserve original assertion')
+            if table == 'gaps' and row['resolution_claim_id'] is not None:
+                resolution = con.execute('SELECT subject_id FROM portfolio_claims WHERE id=?', (row['resolution_claim_id'],)).fetchone()
+                if not resolution or resolution[0] != row['subject_id']:
+                    raise PortfolioError('gap resolution must cite a claim on the same subject')
             if table == 'links':
                 target = con.execute('SELECT kind FROM portfolio_entities WHERE id=?', (row['entity_id'],)).fetchone()
                 if not target or target[0] != 'project':
                     raise PortfolioError('bridge must represent a project')
             _insert(con, table, row)
             counts[table] += 1
+    # Entity-kind corrections must not invalidate any stored typed relationship.
+    for claim in con.execute('''SELECT c.predicate, a.kind, b.kind FROM portfolio_claims c
+            JOIN portfolio_entities a ON a.id=c.subject_id
+            JOIN portfolio_entities b ON b.id=c.object_id'''):
+        if (claim[1], claim[2]) not in RELATIONS[claim[0]]:
+            raise PortfolioError('entity correction invalidates a typed relationship')
+    if con.execute("SELECT 1 FROM portfolio_links l JOIN portfolio_entities e ON e.id=l.entity_id WHERE e.kind != 'project'").fetchone():
+        raise PortfolioError('entity correction invalidates an ecosystem bridge')
     stamp = _time(imported_at) if imported_at else datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     receipt = {'id': batch['id'], 'source_id': batch['source_id'], 'actor': batch['actor'],
                'imported_at': stamp, 'base_revision': current, 'revision': current + 1,
                'manifest_hash': digest, 'status': 'committed', 'visibility': 'private',
-               'inserted': counts}
+               'inserted': counts, 'updated': updates}
     _insert(con, 'batches', {k: receipt[k] for k in ('id', 'source_id', 'actor', 'imported_at',
             'base_revision', 'manifest_hash', 'status', 'visibility')} |
             {'manifest_json': canonical(manifest), 'receipt_json': canonical(receipt)})
@@ -433,3 +463,171 @@ def export_archive(con):
                             for r in con.execute('SELECT * FROM portfolio_batches ORDER BY base_revision')]}
     finally:
         con.rollback()
+
+
+def validate_archive(archive):
+    if not isinstance(archive, dict) or set(archive) != {
+            'format', 'version', 'visibility', 'revision', 'batches'} \
+            or archive['format'] != 'intergraph-portfolio-archive' \
+            or type(archive['version']) is not int or archive['version'] != VERSION:
+        raise PortfolioError('invalid archive envelope')
+    _visibility(archive['visibility'])
+    if type(archive['revision']) is not int or archive['revision'] < 0 \
+            or not isinstance(archive['batches'], list) \
+            or archive['revision'] != len(archive['batches']):
+        raise PortfolioError('invalid archive revision')
+    for batch in archive['batches']:
+        if not isinstance(batch, dict) or set(batch) != {'manifest', 'receipt'}:
+            raise PortfolioError('invalid archived batch')
+        validate(batch['manifest'])
+        if not isinstance(batch['receipt'], dict) or 'imported_at' not in batch['receipt']:
+            raise PortfolioError('invalid archived receipt')
+        _time(batch['receipt']['imported_at'])
+    return archive
+
+
+def import_archive(path, archive, expected_revision=None, dry_run=False):
+    """Restore a lossless archive atomically to an empty store, or replay unchanged.
+
+    Archives are recovery transports, not merge instructions. Each original batch
+    is fully revalidated; its receipt and manifest hash must reproduce exactly.
+    """
+    validate_archive(archive)
+    # Validate the entire replay before even opening a destination for writing.
+    with closing(sqlite3.connect(':memory:')) as scratch:
+        scratch.row_factory = sqlite3.Row
+        scratch.execute('PRAGMA foreign_keys=ON')
+        scratch.execute('BEGIN IMMEDIATE')
+        _schema(scratch)
+        for index, entry in enumerate(archive['batches']):
+            receipt = _apply(scratch, entry['manifest'], index, entry['receipt']['imported_at'])
+            if receipt != entry['receipt']:
+                raise PortfolioError('archive receipt does not reproduce')
+    path = Path(path).expanduser().resolve()
+    if type(expected_revision) is not int and not dry_run:
+        raise PortfolioError('expected revision is required')
+    if dry_run:
+        con = sqlite3.connect(':memory:')
+        if path.exists():
+            with closing(open_readonly(path)) as source:
+                source.backup(con)
+    else:
+        if not path.exists():
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(fd)
+        elif path.stat().st_mode & 0o077:
+            raise PortfolioError('portfolio file must be accessible only to its owner')
+        con = sqlite3.connect(path)
+    con.row_factory = sqlite3.Row
+    try:
+        con.execute('PRAGMA foreign_keys=ON')
+        con.execute('BEGIN IMMEDIATE')
+        _schema(con)
+        current = revision(con)
+        old = [{'manifest': loads(r['manifest_json']), 'receipt': loads(r['receipt_json'])}
+               for r in con.execute('SELECT * FROM portfolio_batches ORDER BY base_revision')]
+        if old == archive['batches']:
+            result = {'revision': current, 'visibility': 'private', 'replayed': True}
+        else:
+            if current != 0 or (expected_revision is not None and expected_revision != current):
+                raise PortfolioError('archive restore requires empty store at expected revision')
+            for index, entry in enumerate(archive['batches']):
+                _apply(con, entry['manifest'], index, entry['receipt']['imported_at'])
+            result = {'revision': revision(con), 'visibility': 'private', 'replayed': False}
+        if dry_run:
+            result.update(dry_run=True, gaps=_rows(con, 'gaps'))
+            con.rollback()
+        else:
+            con.commit()
+        return result
+    except sqlite3.DatabaseError:
+        con.rollback()
+        raise PortfolioError('portfolio restore aborted; invalid database state') from None
+    finally:
+        con.close()
+
+
+def import_document(path, document, expected_revision=None, dry_run=False):
+    if isinstance(document, dict) and document.get('format') == 'intergraph-portfolio-archive':
+        return import_archive(path, document, expected_revision, dry_run)
+    return import_manifest(path, document, expected_revision, dry_run)
+
+
+def _claims(con):
+    claims = _rows(con, 'claims')
+    superseded = {c['supersedes'] for c in claims if c['supersedes']}
+    sources = {s['id']: s for s in _rows(con, 'sources')}
+    for c in claims:
+        c['effective'] = c['id'] not in superseded and c['state'] != 'retracted'
+        c['source'] = sources[c['source_id']]
+    return claims
+
+
+def _output(con, **data):
+    return {'revision': revision(con), 'visibility': 'private', **data}
+
+
+def find(con, query='', kind=None, state=None):
+    if not isinstance(query, str) or kind is not None and kind not in KINDS \
+            or state is not None and state not in STATES:
+        raise PortfolioError('invalid find filter')
+    claims = _claims(con)
+    result = []
+    for entity in _rows(con, 'entities'):
+        own = [c for c in claims if c['subject_id'] == entity['id']]
+        aliases = [c['value_json'] for c in own if c['predicate'] == 'alias' and c['effective']]
+        if kind is not None and entity['kind'] != kind:
+            continue
+        if state is not None and not any(c['state'] == state for c in own):
+            continue
+        if query.casefold() not in entity['label'].casefold() \
+                and query != entity['id'] \
+                and not any(isinstance(a, str) and query.casefold() in a.casefold() for a in aliases):
+            continue
+        result.append(dict(entity, claims=own))
+    return _output(con, entities=result)
+
+
+def neighbors(con, id, direction='both', predicates=None, states=None, include_history=False):
+    _text(id)
+    if direction not in {'in', 'out', 'both'} or type(include_history) is not bool:
+        raise PortfolioError('invalid neighbor options')
+    for values, allowed in ((predicates, RELATIONS), (states, STATES)):
+        if values is not None and (not isinstance(values, list) or
+                any(not isinstance(x, str) or x not in allowed for x in values)):
+            raise PortfolioError('invalid neighbor filter')
+    predicates = set(RELATIONS) - {'candidate-same-as'} if predicates is None else set(predicates)
+    states = {'reported', 'confirmed', 'disputed'} if states is None else set(states)
+    claims = [c for c in _claims(con) if c['object_id'] is not None and
+              c['predicate'] in predicates and c['state'] in states and
+              (include_history or c['effective']) and
+              ((direction in {'out', 'both'} and c['subject_id'] == id) or
+               (direction in {'in', 'both'} and c['object_id'] == id))]
+    return _output(con, claims=claims)
+
+
+def gaps(con, subject_id=None, ecosystem_path=None):
+    if subject_id is not None:
+        _text(subject_id)
+    rows = [r for r in _rows(con, 'gaps') if subject_id is None or r['subject_id'] == subject_id]
+    for row in rows:
+        row['source'] = dict(con.execute('SELECT * FROM portfolio_sources WHERE id=?', (row['source_id'],)).fetchone())
+    links = [r for r in _rows(con, 'links') if subject_id is None or r['entity_id'] == subject_id]
+    ecosystem = None
+    try:
+        if ecosystem_path is not None and Path(ecosystem_path).is_file():
+            uri = Path(ecosystem_path).resolve().as_uri() + '?mode=ro'
+            ecosystem = sqlite3.connect(uri, uri=True)
+            ecosystem.execute('PRAGMA query_only=ON')
+        for link in links:
+            link['endpoint_status'] = 'unresolved'
+            if ecosystem is not None:
+                exists = ecosystem.execute('SELECT 1 FROM nodes WHERE id=?', (link['ecosystem_node_id'],)).fetchone()
+                link['endpoint_status'] = 'resolved' if exists else 'dangling'
+    except sqlite3.DatabaseError:
+        for link in links:
+            link['endpoint_status'] = 'unresolved'
+    finally:
+        if ecosystem is not None:
+            ecosystem.close()
+    return _output(con, gaps=rows, bridges=links)
