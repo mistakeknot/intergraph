@@ -1,3 +1,7 @@
 data/*.db
 data/*.db-journal
 __pycache__/
+# Private portfolio stores and local transport artifacts never belong in git.
+*.sqlite
+*.sqlite-*
+portfolio-private/

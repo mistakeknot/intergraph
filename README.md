@@ -78,3 +78,12 @@ python3 -m unittest discover -s tests
 ```
 
 Pure Python stdlib — no dependencies, no build step.
+
+## Private portfolio (additive)
+
+A separate durable portfolio file and read-only MCP entry point are available
+without changing ecosystem ingest/reset or existing tools. Explicit local CLI
+commands prepare, validate, import and losslessly export private manifests.
+See [the portfolio contract](docs/portfolio.md) for lifecycle, schema, privacy,
+bootstrap review and recovery instructions. No public publication or deployment
+is included.
