@@ -78,3 +78,9 @@ python3 -m unittest discover -s tests
 ```
 
 Pure Python stdlib — no dependencies, no build step.
+
+## Private portfolio
+
+Use the [portfolio commands](docs/portfolio.md) to convert a Markdown inventory,
+review and apply a manifest, or export a lossless recovery archive. The
+portfolio uses its own SQLite file and an opt-in read-only MCP server.
