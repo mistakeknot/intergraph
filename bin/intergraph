@@ -12,6 +12,55 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from intergraph import behavior, code, export, ingest, store  # noqa: E402
 
 
+def portfolio_command(args):
+    import os
+    import sqlite3
+    from contextlib import ExitStack, closing
+
+    from intergraph import portfolio
+
+    try:
+        if args.db is not None:
+            raise portfolio.PortfolioError("use --portfolio-db for the private store")
+        if args.cmd == "portfolio-convert":
+            from intergraph.portfolio_convert import convert
+
+            prior = portfolio.loads(Path(args.sidecar).read_text(encoding="utf-8")) if args.sidecar else None
+            inventory = Path(args.inventory).read_text(encoding="utf-8")
+            manifest, sidecar, result = convert(inventory, args.observed_at, prior)
+            outputs = (Path(args.output_manifest), Path(args.output_sidecar))
+            if outputs[0].resolve() == outputs[1].resolve():
+                raise portfolio.PortfolioError("conversion requires two distinct new output files")
+            created = []
+            try:
+                with ExitStack() as stack:
+                    for path, value in zip(outputs, (manifest, sidecar)):
+                        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                        created.append(path)
+                        stream = stack.enter_context(os.fdopen(fd, "w", encoding="utf-8"))
+                        json.dump(value, stream, indent=2, allow_nan=False)
+                        stream.write("\n")
+            except (ValueError, OSError):
+                for path in created:
+                    path.unlink(missing_ok=True)
+                raise
+        else:
+            database = args.portfolio_db or portfolio.default_path()
+            if args.cmd == "portfolio-import":
+                document = portfolio.loads(Path(args.manifest).read_text(encoding="utf-8"))
+                result = portfolio.import_document(database, document, args.expected_revision, args.dry_run)
+            else:
+                with closing(portfolio.open_readonly(database)) as con:
+                    result = portfolio.export_archive(con)
+        print(json.dumps(result, indent=2, allow_nan=False))
+        return 0
+    except portfolio.PortfolioError as error:
+        print(error, file=sys.stderr)
+    except (ValueError, TypeError, KeyError, OSError, sqlite3.DatabaseError):
+        print("portfolio operation unavailable", file=sys.stderr)
+    return 2
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="intergraph")
     ap.add_argument("--db", help="SQLite db path (default: data/intergraph.db)")
@@ -49,7 +98,25 @@ def main() -> int:
     p_drift = sub.add_parser("drift", help="declared vs observed coupling, both directions")
     p_drift.add_argument("--limit", type=int, default=50)
 
+    p_import = sub.add_parser("portfolio-import", help="validate or apply a private manifest or archive")
+    p_import.add_argument("manifest")
+    p_import.add_argument("--portfolio-db")
+    p_import.add_argument("--expected-revision", type=int)
+    p_import.add_argument("--dry-run", action="store_true")
+
+    p_export = sub.add_parser("portfolio-export", help="write a private recovery archive to stdout")
+    p_export.add_argument("--portfolio-db")
+
+    p_convert = sub.add_parser("portfolio-convert", help="propose a private manifest from a Markdown inventory")
+    p_convert.add_argument("inventory")
+    p_convert.add_argument("--observed-at", required=True)
+    p_convert.add_argument("--sidecar")
+    p_convert.add_argument("--output-manifest", required=True)
+    p_convert.add_argument("--output-sidecar", required=True)
+
     args = ap.parse_args()
+    if args.cmd.startswith("portfolio-"):
+        return portfolio_command(args)
     con = store.connect(args.db)
 
     if args.cmd == "ingest":
