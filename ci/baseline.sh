@@ -11,22 +11,24 @@ fi
 mode=${1:-run}
 [[ $# -le 1 && ( $mode == run || $mode == --check ) ]]
 echo "RECIPE intergraph baseline v1"
-echo "HEAD $(git rev-parse HEAD)"
-echo "TREE_DIRTY $(git status --porcelain | wc -l)"
+head=$(git rev-parse HEAD)
+status=$(git status --porcelain)
+echo "HEAD $head"
+echo "TREE_DIRTY $(printf '%s' "$status" | grep -c . || true)"
 python3 --version
-echo 'PLAN python3 -I -m unittest discover -s tests; offline, fresh HOME and TMPDIR'
+echo 'PLAN python3 -I -B -m unittest discover -s tests; offline, fresh HOME and TMPDIR, no bytecode writes'
 echo 'EXCLUDED nothing: the suite has no network, credential or service dependencies'
 if [[ $mode == --check ]]; then exit 0; fi
 if [[ -n ${CI_SOURCE_SHA:-} ]]; then
-  [[ $(git rev-parse HEAD) == "$CI_SOURCE_SHA" ]]
-  [[ -z $(git status --porcelain) ]]
+  [[ $head == "$CI_SOURCE_SHA" ]]
+  [[ -z $status ]]
 fi
 [[ $(uname -s) == Linux ]]
 SCRATCH=$(mktemp -d)
 trap 'rm -rf -- "$SCRATCH"' EXIT
 mkdir -p "$SCRATCH/home" "$SCRATCH/tmp"
-export HOME=$SCRATCH/home TMPDIR=$SCRATCH/tmp PYTHONDONTWRITEBYTECODE=1
-if nice -n 19 timeout 900 python3 -I -m unittest discover -s tests -v > "$SCRATCH/unittest.log" 2>&1; then
+export HOME=$SCRATCH/home TMPDIR=$SCRATCH/tmp
+if nice -n 19 timeout 900 python3 -I -B -m unittest discover -s tests -v > "$SCRATCH/unittest.log" 2>&1; then
   tail -n 4 "$SCRATCH/unittest.log"
   echo "CHECK unittest PASS"
 else
