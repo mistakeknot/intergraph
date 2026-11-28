@@ -49,7 +49,54 @@ def main() -> int:
     p_drift = sub.add_parser("drift", help="declared vs observed coupling, both directions")
     p_drift.add_argument("--limit", type=int, default=50)
 
+    for command in ('portfolio-import', 'portfolio-export'):
+        parser = sub.add_parser(command, help='explicit private portfolio transport')
+        parser.add_argument('--portfolio-db', help='durable portfolio file (separate from ecosystem)')
+        if command == 'portfolio-import':
+            parser.add_argument('manifest', help='versioned manifest or lossless JSON archive')
+            parser.add_argument('--dry-run', action='store_true')
+            parser.add_argument('--expected-revision', type=int)
+    conv = sub.add_parser('portfolio-convert', help='prepare private reviewable manifest; never imports')
+    conv.add_argument('inventory')
+    conv.add_argument('--observed-at', required=True, help='ISO 8601 timestamp with timezone')
+    conv.add_argument('--sidecar', help='previous private identity sidecar (read only)')
+    conv.add_argument('--output-manifest', required=True)
+    conv.add_argument('--output-sidecar', required=True, help='new sidecar; retain only after accepted import')
     args = ap.parse_args()
+    if args.cmd.startswith('portfolio-'):
+        from contextlib import closing
+        from intergraph import portfolio
+        import sqlite3
+        try:
+            if args.db:
+                raise portfolio.PortfolioError('use --portfolio-db, not legacy --db')
+            if args.cmd == 'portfolio-convert':
+                import os
+                from intergraph.portfolio_convert import convert
+                prior = portfolio.loads(Path(args.sidecar).read_text()) if args.sidecar else None
+                manifest, sidecar, report = convert(Path(args.inventory).read_text(), args.observed_at, prior)
+                outputs = [(Path(args.output_manifest), manifest), (Path(args.output_sidecar), sidecar)]
+                if any(path.exists() or path.is_symlink() for path, _ in outputs) or outputs[0][0].resolve() == outputs[1][0].resolve():
+                    raise portfolio.PortfolioError('conversion outputs must be distinct new private files')
+                for path, value in outputs:
+                    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                    with os.fdopen(fd, 'w') as stream:
+                        stream.write(json.dumps(value, indent=2))
+                print(json.dumps(report, indent=2))
+                return 0
+            path = args.portfolio_db or portfolio.default_path()
+            if args.cmd == 'portfolio-import':
+                document = portfolio.loads(Path(args.manifest).read_text())
+                out = portfolio.import_document(path, document, args.expected_revision, args.dry_run)
+            else:
+                with closing(portfolio.open_readonly(path)) as con:
+                    out = portfolio.export_archive(con)
+            print(json.dumps(out, indent=2))
+            return 0
+        except (ValueError, TypeError, KeyError, OSError, sqlite3.DatabaseError) as e:
+            # Never echo input data, SQL values, or private file paths in errors.
+            print(str(e) if isinstance(e, portfolio.PortfolioError) else 'portfolio operation unavailable', file=sys.stderr)
+            return 2
     con = store.connect(args.db)
 
     if args.cmd == "ingest":
